@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>FFTB — Cards</title>
+<link href="https://fonts.googleapis.com/css2?family=Marcellus:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#800020; --ink:#fff; --btn:#000; --btn2:#333; --accent:#CC3232; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; padding:0; font-family:'Marcellus',serif; background:var(--bg); color:var(--ink); }
+  main { max-width:960px; margin:0 auto; padding:16px; text-align:center; }
+  #logo { width:250px; margin-bottom:12px; }
+  .controls { display:inline-flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  input[type="number"] { width:220px; padding:6px 8px; font-size:1rem; border-radius:4px; border:1px solid #0007; }
+  button { background:var(--btn); color:var(--accent); border:none; padding:8px 12px; border-radius:4px; cursor:pointer; }
+  button:hover { background:var(--btn2); }
+  #cards { margin-top:8px; }
+  #cards img { width:65px; margin:4px; opacity:.6; transition:.2s; vertical-align:middle; }
+  #cards img.current { width:130px; opacity:1; }
+  #mult { margin-top:10px; font-weight:bold; font-size:1.2em; }
+  #result { margin-top:10px; font-size:1.1em; }
+  #helpBtn { position:fixed; top:10px; right:10px; background:#000; color:#fff; border:none; border-radius:50%; width:30px; height:30px; font-size:1.1em; }
+  #helpContent { display:none; position:fixed; top:50px; right:10px; width:260px; background:#000d; padding:10px; border:1px solid #fff; border-radius:4px; z-index:1000; text-align:left;}
+  #helpContent p { margin:.3em 0; font-size:.9em; line-height:1.25; }
+</style>
+</head>
+<body>
+<main>
+  <table style="margin:0 auto;"><tr>
+    <td><img id="logo" src="assets/logo.png" alt="Logo"></td>
+    <td style="padding-left:10px;">
+      <div class="controls">
+        <label>Bet:
+          <input type="number" id="bet" value="10" min="1" />
+        </label>
+        <button id="startBtn">Start Game</button>
+        <button id="popBtn">Pop</button>
+      </div>
+    </td>
+  </tr></table>
+
+  <button id="helpBtn">?</button>
+  <div id="helpContent">
+    <p><strong>How to Play</strong></p>
+    <p>• Enter a bet and click Start.</p>
+    <p>• Draw cards: numbers add to multiplier; a Kobold resets it; a Dragon ends the round and you lose the bet.</p>
+    <p>• Cash Out anytime to take bet × multiplier.</p>
+  </div>
+
+  <section id="status">
+    <div id="cards"></div>
+    <div id="mult"></div>
+    <div id="controls"></div>
+    <div id="result"></div>
+  </section>
+</main>
+
+<script>
+  // --- Asset maps (images now from /assets) ---
+  const cardImages = {
+    'DRAGON':'assets/dragon.png',
+    'KOBOLD':'assets/kobold.png',
+    '0':'assets/0.png',
+    '1':'assets/1.png',
+    '2':'assets/2.png',
+    '3':'assets/3.png',
+    '5':'assets/5.png'
+  };
+
+  // Sound file paths (all under /assets)
+  const SND = {
+    good:   'assets/good.wav',
+    better: 'assets/better.wav',
+    kobold: 'assets/kobold.wav',
+    dragon: 'assets/dragon.wav',
+    deals:  ['assets/deal1.wav','assets/deal2.wav','assets/deal3.wav']
+  };
+
+  // Preload (optional; creates a small cache so first play is snappy)
+  const _preloaded = new Map();
+  [...Object.values(cardImages),
+   SND.good, SND.better, SND.kobold, SND.dragon, ...SND.deals
+  ].forEach(src => { const a = new Audio(); a.src = src; _preloaded.set(src, a); });
+
+  // Simple helper: play a fresh Audio instance (avoids reuse/overlap edge cases)
+  function playSnd(kind) {
+    let src = null;
+    if (kind === 'deal') {
+      const choices = SND.deals;
+      src = choices[Math.floor(Math.random()*choices.length)];
+    } else if (SND[kind]) {
+      src = SND[kind];
+    }
+    if (!src) return;
+    try {
+      // create a throwaway instance so multiple sounds can overlap naturally
+      const a = new Audio(src);
+      // Some browsers block autoplay unless triggered by a user gesture.
+      // We're only calling this inside click-driven flows (start / draw), so it's fine.
+      a.play().catch(()=>{ /* ignore */ });
+    } catch(e) { /* ignore */ }
+  }
+
+  // Same deck weights as before
+  const deckWeights = { 'DRAGON':7, 'KOBOLD':6, '0':4, '1':7, '2':5, '3':4, '5':1 };
+  const weightedDeck = Object.entries(deckWeights)
+    .flatMap(([name, n]) => Array(n).fill(name));
+
+  // Game state
+  let bet = 0, multiplier = 0, popupWindow = null, gameOver = false, finalMessage = '';
+
+  // UI refs
+  const cardsDiv = document.getElementById('cards');
+  const multDiv  = document.getElementById('mult');
+  const resultDiv= document.getElementById('result');
+  const controlsDiv = document.getElementById('controls');
+
+  document.getElementById('startBtn').addEventListener('click', () => {
+    start();
+//    playSnd('deal'); // play on game start
+  });
+  document.getElementById('popBtn').addEventListener('click', openPopup);
+  document.getElementById('helpBtn').addEventListener('click', toggleHelp);
+
+  function start() {
+    bet = +document.getElementById('bet').value || 0;
+    multiplier = 0;
+    gameOver = false;
+    finalMessage = '';
+    cardsDiv.innerHTML = '';
+    multDiv.textContent = '';
+    resultDiv.textContent = '';
+    controlsDiv.innerHTML = `
+      <button id="playBtn">Draw a Card</button>
+      <button id="cashBtn">Cash Out</button>`;
+    document.getElementById('playBtn').onclick = () => { playSnd('deal'); play(); };
+    document.getElementById('cashBtn').onclick = cash;
+    updatePopup();
+  }
+
+  function drawCardLocal() {
+    const name = weightedDeck[Math.floor(Math.random()*weightedDeck.length)];
+    return { name, img: cardImages[name] || '' };
+  }
+
+  function play() {
+    if (gameOver) return;
+    const { name, img } = drawCardLocal();
+
+    const prev = cardsDiv.querySelector('img.current');
+    if (prev) prev.classList.remove('current');
+    const imgEl = document.createElement('img');
+    imgEl.src = img; imgEl.alt = name; imgEl.classList.add('current');
+    cardsDiv.appendChild(imgEl);
+
+    if (name === 'KOBOLD') {
+      multiplier = 0;
+      playSnd('kobold');
+    } else if (name === 'DRAGON') {
+      gameOver = true;
+      finalMessage = 'Dragon Attack! You lost your bet!';
+      playSnd('dragon');
+      endGame(0, finalMessage);
+    } else {
+      // numeric: 0,1,2,3,5
+      const v = +name;
+      multiplier += v;
+      if (v === 5) playSnd('better');
+      else if (v === 1 || v === 2 || v === 3) playSnd('good');
+      // no sound on 0 (per your spec)
+    }
+
+    multDiv.textContent = `Multiplier: ${multiplier}×`;
+    updatePopup();
+  }
+
+  function cash() {
+    if (gameOver) return;
+    const winnings = bet * multiplier;
+    gameOver = true;
+    finalMessage = `You cashed out and won ${winnings} gold!`;
+    endGame(winnings, finalMessage);
+    updatePopup();
+  }
+
+  function endGame(amount, message) {
+    controlsDiv.innerHTML = '';
+    resultDiv.innerHTML = `<b>${message}</b>`;
+  }
+
+  function openPopup() {
+    if (popupWindow && !popupWindow.closed) {
+      popupWindow.focus();
+    } else {
+      popupWindow = window.open('', 'FFTBPopup', 'width=1920,height=1080');
+      popupWindow.document.write(`
+        <!DOCTYPE html><html><head><title>FFTB Popup</title>
+        <link href="https://fonts.googleapis.com/css2?family=Marcellus:wght@400;700&display=swap" rel="stylesheet">
+        <style>
+          html,body { margin:0; padding:16px; font-family:'Marcellus',serif; background:#800020; color:#fff; text-align:center; }
+          #cards img { width:65px; margin:4px; opacity:.6; transition:.2s; vertical-align:middle; }
+          #cards img.current { width:130px; opacity:1; }
+          #mult { margin-top:10px; font-weight:bold; font-size:1.2em; }
+          #result { margin-top:10px; font-size:1.1em; }
+        </style>
+        </head><body>
+          <div id="cards"></div>
+          <div id="mult"></div>
+          <div id="result"></div>
+        </body></html>`);
+    }
+    updatePopup();
+  }
+
+  function updatePopup() {
+    if (!popupWindow || popupWindow.closed) return;
+    const cardsHtml = Array.from(document.querySelectorAll('#cards img'))
+      .map(img => `<img src="${img.src}" class="${img.className}">`).join('');
+    const multHtml = `<div id="mult">${multDiv.textContent}</div>`;
+    const resultHtml = gameOver ? `<div id="result"><b>${finalMessage}</b></div>` : '';
+    popupWindow.document.getElementById('cards').innerHTML = cardsHtml;
+    popupWindow.document.getElementById('mult').innerHTML = multHtml;
+    popupWindow.document.getElementById('result').innerHTML = resultHtml;
+  }
+
+  function toggleHelp() {
+    const hc = document.getElementById('helpContent');
+    hc.style.display = hc.style.display === 'block' ? 'none' : 'block';
+  }
+</script>
+</body>
+</html>
